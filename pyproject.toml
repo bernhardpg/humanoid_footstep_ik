@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "humanoid-footstep-ik"
+version = "0.1.0"
+description = ""
+authors = ["Bernhard Paus Graesdal <bernhardpg@gmail.com>"]
+readme = "README.md"
+packages = [{include = "humanoid_footstep_ik"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+drake = "^1.36.0"
+numpy = "^2.2.0"
+matplotlib = "^3.9.4"
+pdbpp = "^0.10.3"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
