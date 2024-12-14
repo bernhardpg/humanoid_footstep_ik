@@ -187,6 +187,11 @@ def print_atlas_model_details(
         print(
             f"  Associated frames: {joint.frame_on_parent().name()} and {joint.frame_on_child().name()}"
         )
+    print()
+
+    for body_index in plant.GetBodyIndices(plant.GetModelInstanceByName("atlas")):
+        body = plant.get_body(body_index)
+        print(f"Body name: {body.name()}")
 
 
 def solve_ik(
@@ -273,8 +278,14 @@ def visualize_trajectory(
     # atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
     atlas_model_instance = parser.AddModelsFromUrl(atlas_model_file)[0]
 
-    if debug:
-        print_atlas_model_details(plant, atlas_model_instance)
+    # Add one foot per footstep in the plan
+    atlas_left_foot_file = Path("assets/atlas/left_foot.urdf")
+    assert atlas_left_foot_file.exists()
+    left_foot_instance = Parser(plant).AddModels(str(atlas_left_foot_file))[0]
+
+    atlas_right_foot_file = Path("assets/atlas/right_foot.urdf")
+    assert atlas_right_foot_file.exists()
+    right_foot_instance = Parser(plant).AddModels(str(atlas_right_foot_file))[0]
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
@@ -285,13 +296,31 @@ def visualize_trajectory(
 
     plant.Finalize()
 
+    if debug:
+        print_atlas_model_details(plant, atlas_model_instance)
+
     context = diagram.CreateDefaultContext()
     plant_context = plant.GetMyMutableContextFromRoot(context)
 
-    default_positions = plant.GetPositions(plant_context)
+    # Set the positions of the free-floating feet
+    left_foot_body = plant.GetBodyByName("l_foot", left_foot_instance)
+    desired_position = [1.0, 1.0, 0.0]
+    pose = RigidTransform(p=desired_position)  # type: ignore
+    plant.SetFreeBodyPose(plant_context, left_foot_body, pose)
 
+    right_foot_body = plant.GetBodyByName("r_foot", right_foot_instance)
+    desired_position = [1.0, -1.0, 0.0]
+    pose = RigidTransform(p=desired_position)  # type: ignore
+    plant.SetFreeBodyPose(plant_context, right_foot_body, pose)
+
+    # default_positions = plant.GetPositions(plant_context)
+
+    # Set Atlas positions
+    NUM_ATLAS_POSITIONS = 37
     solution = solve_ik(plant, atlas_model_instance)
-    plant.SetPositions(plant_context, solution)
+    plant.SetPositions(
+        plant_context, atlas_model_instance, solution[:NUM_ATLAS_POSITIONS]
+    )
 
     simulator = Simulator(diagram, context)
     simulator.set_target_realtime_rate(1.0)
@@ -310,4 +339,4 @@ if __name__ == "__main__":
 
     viz_params = VisualizationParams(stone_height=0.5)
 
-    visualize_trajectory(traj, viz_params)
+    visualize_trajectory(traj, viz_params, debug=False)
