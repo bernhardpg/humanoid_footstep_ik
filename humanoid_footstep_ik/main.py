@@ -26,11 +26,15 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class VisualizationParams:
+    stone_height: float
+
+
+@dataclass
 class Stone:
     name: str
     width: float
     depth: float
-    height: float
     com: NDArray[np.float64]
     color: NDArray[np.float64] = field(
         default_factory=lambda: np.array([0.5, 0.5, 0.8, 1.0])  # light purple
@@ -41,7 +45,6 @@ class Stone:
         cls,
         name: str,
         bbox: tuple[tuple[float, float], tuple[float, float]],
-        height: float,
     ) -> "Stone":
         """
         Creates a Stone instance from a bounding box.
@@ -49,7 +52,6 @@ class Stone:
         Args:
             bbox (tuple[tuple[float, float], tuple[float, float]]):
                 A bounding box defined as [(x_lower, y_lower), (x_upper, y_upper)].
-            height (float): The height of the stone (default is 0.1).
 
         Returns:
             Stone: An instance of the Stone class.
@@ -63,32 +65,35 @@ class Stone:
 
         # Compute center of mass (CoM)
         com = np.array(
-            [(x_lower + x_upper) / 2, (y_lower + y_upper) / 2, height / 2],
+            [(x_lower + x_upper) / 2, (y_lower + y_upper) / 2],
             dtype=np.float64,
         )
 
-        return cls(name=name, width=width, depth=depth, height=height, com=com)
+        return cls(name=name, width=width, depth=depth, com=com)
 
-    def add_to_plant(self, plant: MultibodyPlant) -> None:
+    def add_to_plant(self, plant: MultibodyPlant, stone_height: float) -> None:
         friction = CoulombFriction(static_friction=0.9, dynamic_friction=0.5)
-        transform = RigidTransform(np.array([self.com[0], self.com[1], self.com[2]]))  # type: ignore
+
+        z_pos = -stone_height / 2  # z=0 is top of stone
+
+        transform = RigidTransform(np.array([self.com[0], self.com[1], z_pos]))  # type: ignore
         plant.RegisterCollisionGeometry(
             plant.world_body(),
             transform,
-            self.get_drake_box(),
+            self.get_drake_box(stone_height),
             self.name,
             friction,
         )
         plant.RegisterVisualGeometry(
             plant.world_body(),
             transform,
-            self.get_drake_box(),
+            self.get_drake_box(stone_height),
             self.name,
             self.color,  # type: ignore
         )
 
-    def get_drake_box(self) -> DrakeBox:
-        return DrakeBox(self.width, self.depth, self.height)
+    def get_drake_box(self, stone_height: float) -> DrakeBox:
+        return DrakeBox(self.width, self.depth, stone_height)
 
 
 @dataclass
@@ -107,7 +112,7 @@ class FootstepTrajectory:
     contact_modes: list[Literal["Ld_Rd", "Ld_Ru", "Lu_Rd"]]
 
     @classmethod
-    def load(cls, filepath: Path, stone_height: float = 0.1) -> "FootstepTrajectory":
+    def load(cls, filepath: Path) -> "FootstepTrajectory":
         with open(filepath, "rb") as f:
             data = pickle.load(f)
 
@@ -117,7 +122,7 @@ class FootstepTrajectory:
             foot_half_width=data["foot_half_width"],
             foot_half_length=data["foot_half_length"],
             stones=[
-                Stone.from_bbox(f"stone_{idx}", bbox, height=stone_height)
+                Stone.from_bbox(f"stone_{idx}", bbox)
                 for idx, bbox in enumerate(data["stones"])
             ],
             com_xy_position=data["com_xy_position"],
@@ -184,7 +189,9 @@ def print_atlas_model_details(
         )
 
 
-def solve_ik(plant: MultibodyPlant) -> NDArray[np.float64]:
+def solve_ik(
+    plant: MultibodyPlant, atlas_model_instance: ModelInstanceIndex
+) -> NDArray[np.float64]:
     base_frame = plant.GetFrameByName("pelvis", atlas_model_instance)
     left_foot_frame = plant.GetFrameByName("l_foot", atlas_model_instance)
     right_foot_frame = plant.GetFrameByName("r_foot", atlas_model_instance)
@@ -253,16 +260,9 @@ def solve_ik(plant: MultibodyPlant) -> NDArray[np.float64]:
     return solution  # type: ignore
 
 
-if __name__ == "__main__":
-    # Parameters
-    stone_height = 0.5
-
-    # Silence Drake messages
-    # logging.getLogger("drake").setLevel(logging.WARNING)
-
-    datapath = Path("data/example_data.pkl")
-    traj = FootstepTrajectory.load(datapath, stone_height=stone_height)
-
+def visualize_trajectory(
+    traj: FootstepTrajectory, viz_params: VisualizationParams, debug: bool = False
+) -> None:
     meshcat = StartMeshcat()
 
     builder = DiagramBuilder()
@@ -273,23 +273,24 @@ if __name__ == "__main__":
     # atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
     atlas_model_instance = parser.AddModelsFromUrl(atlas_model_file)[0]
 
+    if debug:
+        print_atlas_model_details(plant, atlas_model_instance)
+
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
     diagram.set_name("plant and scene_graph")
 
     for stone in traj.stones:
-        stone.add_to_plant(plant)
+        stone.add_to_plant(plant, viz_params.stone_height)
 
     plant.Finalize()
-
-    # print_atlas_model_details(plant, atlas_model_instance)
 
     context = diagram.CreateDefaultContext()
     plant_context = plant.GetMyMutableContextFromRoot(context)
 
     default_positions = plant.GetPositions(plant_context)
 
-    solution = solve_ik(plant)
+    solution = solve_ik(plant, atlas_model_instance)
     plant.SetPositions(plant_context, solution)
 
     simulator = Simulator(diagram, context)
@@ -298,3 +299,15 @@ if __name__ == "__main__":
 
     while True:
         ...
+
+
+if __name__ == "__main__":
+    # Silence Drake messages
+    # logging.getLogger("drake").setLevel(logging.WARNING)
+
+    datapath = Path("data/example_data.pkl")
+    traj = FootstepTrajectory.load(datapath)
+
+    viz_params = VisualizationParams(stone_height=0.5)
+
+    visualize_trajectory(traj, viz_params)
