@@ -1,19 +1,17 @@
-from pathlib import Path
-
 # Import some basic libraries and functions for this tutorial.
 import numpy as np
-import os
 
-from pydrake.common import temp_directory
-from pydrake.geometry import SceneGraphConfig, StartMeshcat
+from pydrake.geometry import StartMeshcat
 from pydrake.geometry.all import Box, MeshcatVisualizer
-from pydrake.math import RigidTransform, RollPitchYaw
+from pydrake.multibody.inverse_kinematics import InverseKinematics
+
+from pydrake.math import RigidTransform, RotationMatrix
 from pydrake.multibody.parsing import Parser
 from pydrake.multibody.plant import AddMultibodyPlantSceneGraph, CoulombFriction
 from pydrake.multibody.tree import JointIndex
+from pydrake.solvers import Solve
 from pydrake.systems.analysis import Simulator
 from pydrake.systems.framework import DiagramBuilder
-from pydrake.visualization import AddDefaultVisualization, ModelVisualizer
 
 if __name__ == "__main__":
 
@@ -24,7 +22,7 @@ if __name__ == "__main__":
 
     parser = Parser(plant)
     atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
-    parser.AddModelsFromUrl(atlas_model_file)
+    atlas_model_instance = parser.AddModelsFromUrl(atlas_model_file)[0]
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
@@ -32,8 +30,15 @@ if __name__ == "__main__":
 
     BOX_HEIGHT = 0.5
     z_pos = -BOX_HEIGHT / 2
-    boxes = [Box(1.0, 2.0, BOX_HEIGHT)]
-    box_pos = [np.array([-0.5, -0.5])]
+    boxes = [
+        Box(1.0, 2.0, BOX_HEIGHT),
+        Box(1.0, 2.0, BOX_HEIGHT),
+    ]
+    box_pos = [
+        np.array([-0.7, 0.0]),
+        np.array([0.7, 0.0]),
+    ]
+
     friction = CoulombFriction(static_friction=0.9, dynamic_friction=0.5)
 
     for idx, (box, pos) in enumerate(zip(boxes, box_pos)):
@@ -55,44 +60,127 @@ if __name__ == "__main__":
 
     plant.Finalize()
 
-    # Query the number of positions and velocities
-    num_positions = plant.num_positions()
-    num_velocities = plant.num_velocities()
-    total_states = num_positions + num_velocities
+    print_details = False
+    if print_details:
+        # Query the number of positions and velocities
+        num_positions = plant.num_positions()
+        num_velocities = plant.num_velocities()
+        total_states = num_positions + num_velocities
 
-    print(f"Number of positions: {num_positions}")
-    print(f"Number of velocities: {num_velocities}")
-    print(f"Total states: {total_states}")
+        print(f"Number of positions: {num_positions}")
+        print(f"Number of velocities: {num_velocities}")
+        print(f"Total states: {total_states}")
 
-    # Get position and velocity names
-    position_names = []
-    velocity_names = []
+        # Get position and velocity names
+        position_names = []
+        velocity_names = []
 
-    for joint_index in range(plant.num_joints()):
-        joint = plant.get_joint(JointIndex(joint_index))
-        for position_index in range(joint.num_positions()):
-            pos_name = joint.name()
-            if joint.num_positions() > 1:
-                pos_name += f"_{position_index}"
-            position_names.append(pos_name)
-        for velocity_index in range(joint.num_velocities()):
-            vel_name = joint.name()
-            if joint.num_velocities() > 1:
-                vel_name += f"_{velocity_index}"
-            velocity_names.append(vel_name)
+        for joint_index in range(plant.num_joints()):
+            joint = plant.get_joint(JointIndex(joint_index))
+            for position_index in range(joint.num_positions()):
+                pos_name = joint.name()
+                if joint.num_positions() > 1:
+                    pos_name += f"_{position_index}"
+                position_names.append(pos_name)
+            for velocity_index in range(joint.num_velocities()):
+                vel_name = joint.name()
+                if joint.num_velocities() > 1:
+                    vel_name += f"_{velocity_index}"
+                velocity_names.append(vel_name)
 
-    # Print position and velocity names
-    print("Positions:", position_names)
-    print("Velocities:", velocity_names)
+        # Print position and velocity names
+        print("Positions:", position_names)
+        print("Velocities:", velocity_names)
+
+        # Print all frame names
+        print("Frames in the robot:")
+        for frame in plant.GetFrameIndices(atlas_model_instance):
+            frame_name = plant.get_frame(frame).name()
+            print(frame_name)
+
+        # Iterate over all joints
+        for joint_index in range(plant.num_joints()):
+            joint = plant.get_joint(JointIndex(joint_index))
+            print(
+                f"Joint '{joint.name()}' corresponds to generalized coordinates: "
+                f"{joint.position_start()}, {joint.position_start() + joint.num_positions() - 1}"
+            )
+            print(
+                f"  Associated frames: {joint.frame_on_parent().name()} and {joint.frame_on_child().name()}"
+            )
 
     context = diagram.CreateDefaultContext()
     plant_context = plant.GetMyMutableContextFromRoot(context)
 
     default_positions = plant.GetPositions(plant_context)
 
-    new_positions = default_positions.copy()
-    new_positions[6] = 1.0  # set the z-position a bit higher
-    plant.SetPositions(plant_context, new_positions)
+    # Inverse kinematics
+    base_frame = plant.GetFrameByName("pelvis", atlas_model_instance)
+    left_foot_frame = plant.GetFrameByName("l_foot", atlas_model_instance)
+    right_foot_frame = plant.GetFrameByName("r_foot", atlas_model_instance)
+
+    ik = InverseKinematics(plant)
+    # CoM
+    ik.AddPositionConstraint(
+        frameB=base_frame,  # End-effector frame
+        p_BQ=np.array(
+            [0.0, 0.0, 0.0]
+        ),  # Point Q in frame B (end-effector origin) # type: ignore
+        frameA=plant.world_frame(),  # World frame
+        p_AQ_lower=[0, 0, 0.7],  # type: ignore
+        p_AQ_upper=[0, 0, 1.0],  # type: ignore
+    )
+    ik.AddOrientationConstraint(
+        frameAbar=base_frame,
+        R_AbarA=RotationMatrix(),
+        frameBbar=plant.world_frame(),
+        R_BbarB=RotationMatrix(),
+        theta_bound=0.01,
+    )
+
+    # Left foot
+    ik.AddPositionConstraint(
+        frameB=left_foot_frame,
+        p_BQ=np.array(
+            [0.0, 0.0, 0.0]
+        ),  # Point Q in frame B (end-effector origin) # type: ignore
+        frameA=plant.world_frame(),  # World frame
+        p_AQ_lower=[0.1, 0.2, 0.0],  # type: ignore
+        p_AQ_upper=[0.1, 0.2, 0.2],  # type: ignore
+    )
+    ik.AddOrientationConstraint(
+        frameAbar=left_foot_frame,
+        R_AbarA=RotationMatrix(),
+        frameBbar=plant.world_frame(),
+        R_BbarB=RotationMatrix(),
+        theta_bound=0.01,
+    )
+
+    # Right foot
+    ik.AddPositionConstraint(
+        frameB=right_foot_frame,
+        p_BQ=np.array(
+            [0.0, 0.0, 0.0]
+        ),  # Point Q in frame B (end-effector origin) # type: ignore
+        frameA=plant.world_frame(),  # World frame
+        p_AQ_lower=[0.2, -0.2, 0.0],  # type: ignore
+        p_AQ_upper=[0.2, -0.2, 0.2],  # type: ignore
+    )
+    ik.AddOrientationConstraint(
+        frameAbar=right_foot_frame,
+        R_AbarA=RotationMatrix(),
+        frameBbar=plant.world_frame(),
+        R_BbarB=RotationMatrix(),
+        theta_bound=0.01,
+    )
+
+    result = Solve(ik.prog())
+    if result.is_success():
+        solution = result.GetSolution(ik.q())
+    else:
+        raise RuntimeError("Couldn't find IK solution")
+
+    plant.SetPositions(plant_context, solution)
 
     simulator = Simulator(diagram, context)
     simulator.set_target_realtime_rate(1.0)
