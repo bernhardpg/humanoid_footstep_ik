@@ -1,4 +1,6 @@
-# Import some basic libraries and functions for this tutorial.
+from typing import Literal
+from numpy.typing import NDArray
+from pathlib import Path
 import numpy as np
 
 from pydrake.geometry import StartMeshcat
@@ -12,8 +14,53 @@ from pydrake.multibody.tree import JointIndex
 from pydrake.solvers import Solve
 from pydrake.systems.analysis import Simulator
 from pydrake.systems.framework import DiagramBuilder
+import pickle
+
+from dataclasses import dataclass
+
+
+@dataclass
+class FootstepTrajectory:
+    com_z: float
+    foot_z: float
+    foot_half_width: float
+    foot_half_length: float
+    stones: list[tuple[float, float]]  # [(x, y)_lower, (x, y)_upper]
+    com_xy_position: NDArray[np.float64]
+    cop_xy_position: NDArray[np.float64]
+    left_foot_xy_position: NDArray[np.float64]
+    right_foot_xy_position: NDArray[np.float64]
+    com_xy_velocity: NDArray[np.float64]
+    com_xy_acceleration: NDArray[np.float64]
+    contact_modes: list[Literal["Ld_Rd", "Ld_Ru", "Lu_Rd"]]
+
+    @classmethod
+    def load(cls, filepath: Path) -> "FootstepTrajectory":
+        with open(filepath, "rb") as f:
+            data = pickle.load(f)
+
+        return cls(
+            com_z=data["com_z"],
+            foot_z=data["foot_z"],
+            foot_half_width=data["foot_half_width"],
+            foot_half_length=data["foot_half_length"],
+            stones=data["stones"],
+            com_xy_position=data["com_xy_position"],
+            cop_xy_position=data["cop_xy_position"],
+            left_foot_xy_position=data["left_foot_xy_position"],
+            right_foot_xy_position=data["right_foot_xy_position"],
+            com_xy_velocity=data["com_xy_velocity"],
+            com_xy_acceleration=data["com_xy_acceleration"],
+            contact_modes=data["contact_modes"],
+        )
+
 
 if __name__ == "__main__":
+
+    datapath = Path("data/example_data.pkl")
+    traj = FootstepTrajectory.load(datapath)
+
+    breakpoint()
 
     meshcat = StartMeshcat()
 
@@ -21,7 +68,8 @@ if __name__ == "__main__":
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
 
     parser = Parser(plant)
-    atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
+    # atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
+    atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
     atlas_model_instance = parser.AddModelsFromUrl(atlas_model_file)[0]
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
