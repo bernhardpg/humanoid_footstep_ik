@@ -1,22 +1,94 @@
+import logging
 from typing import Literal
 from numpy.typing import NDArray
 from pathlib import Path
 import numpy as np
 
 from pydrake.geometry import StartMeshcat
-from pydrake.geometry.all import Box, MeshcatVisualizer
+from pydrake.geometry.all import MeshcatVisualizer
+from pydrake.geometry.all import Box as DrakeBox
 from pydrake.multibody.inverse_kinematics import InverseKinematics
 
 from pydrake.math import RigidTransform, RotationMatrix
 from pydrake.multibody.parsing import Parser
-from pydrake.multibody.plant import AddMultibodyPlantSceneGraph, CoulombFriction
-from pydrake.multibody.tree import JointIndex
+from pydrake.multibody.plant import (
+    AddMultibodyPlantSceneGraph,
+    CoulombFriction,
+    MultibodyPlant,
+)
+from pydrake.multibody.tree import JointIndex, ModelInstanceIndex
 from pydrake.solvers import Solve
 from pydrake.systems.analysis import Simulator
 from pydrake.systems.framework import DiagramBuilder
 import pickle
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Stone:
+    name: str
+    width: float
+    depth: float
+    height: float
+    com: NDArray[np.float64]
+    color: NDArray[np.float64] = field(
+        default_factory=lambda: np.array([0.5, 0.5, 0.8, 1.0])  # light purple
+    )
+
+    @classmethod
+    def from_bbox(
+        cls,
+        name: str,
+        bbox: tuple[tuple[float, float], tuple[float, float]],
+        height: float,
+    ) -> "Stone":
+        """
+        Creates a Stone instance from a bounding box.
+
+        Args:
+            bbox (tuple[tuple[float, float], tuple[float, float]]):
+                A bounding box defined as [(x_lower, y_lower), (x_upper, y_upper)].
+            height (float): The height of the stone (default is 0.1).
+
+        Returns:
+            Stone: An instance of the Stone class.
+        """
+        # Extract lower and upper bounds
+        (x_lower, y_lower), (x_upper, y_upper) = bbox
+
+        # Compute width and depth
+        width = x_upper - x_lower
+        depth = y_upper - y_lower
+
+        # Compute center of mass (CoM)
+        com = np.array(
+            [(x_lower + x_upper) / 2, (y_lower + y_upper) / 2, height / 2],
+            dtype=np.float64,
+        )
+
+        return cls(name=name, width=width, depth=depth, height=height, com=com)
+
+    def add_to_plant(self, plant: MultibodyPlant) -> None:
+        friction = CoulombFriction(static_friction=0.9, dynamic_friction=0.5)
+        transform = RigidTransform(np.array([self.com[0], self.com[1], self.com[2]]))  # type: ignore
+        plant.RegisterCollisionGeometry(
+            plant.world_body(),
+            transform,
+            self.get_drake_box(),
+            self.name,
+            friction,
+        )
+        plant.RegisterVisualGeometry(
+            plant.world_body(),
+            transform,
+            self.get_drake_box(),
+            self.name,
+            self.color,  # type: ignore
+        )
+
+    def get_drake_box(self) -> DrakeBox:
+        return DrakeBox(self.width, self.depth, self.height)
 
 
 @dataclass
@@ -25,7 +97,7 @@ class FootstepTrajectory:
     foot_z: float
     foot_half_width: float
     foot_half_length: float
-    stones: list[tuple[float, float]]  # [(x, y)_lower, (x, y)_upper]
+    stones: list[Stone]
     com_xy_position: NDArray[np.float64]
     cop_xy_position: NDArray[np.float64]
     left_foot_xy_position: NDArray[np.float64]
@@ -35,7 +107,7 @@ class FootstepTrajectory:
     contact_modes: list[Literal["Ld_Rd", "Ld_Ru", "Lu_Rd"]]
 
     @classmethod
-    def load(cls, filepath: Path) -> "FootstepTrajectory":
+    def load(cls, filepath: Path, stone_height: float = 0.1) -> "FootstepTrajectory":
         with open(filepath, "rb") as f:
             data = pickle.load(f)
 
@@ -44,7 +116,10 @@ class FootstepTrajectory:
             foot_z=data["foot_z"],
             foot_half_width=data["foot_half_width"],
             foot_half_length=data["foot_half_length"],
-            stones=data["stones"],
+            stones=[
+                Stone.from_bbox(f"stone_{idx}", bbox, height=stone_height)
+                for idx, bbox in enumerate(data["stones"])
+            ],
             com_xy_position=data["com_xy_position"],
             cop_xy_position=data["cop_xy_position"],
             left_foot_xy_position=data["left_foot_xy_position"],
@@ -55,114 +130,61 @@ class FootstepTrajectory:
         )
 
 
-if __name__ == "__main__":
+def print_atlas_model_details(
+    plant: MultibodyPlant, atlas_model_instance: ModelInstanceIndex
+) -> None:
+    # Query the number of positions and velocities
+    num_positions = plant.num_positions()
+    num_velocities = plant.num_velocities()
+    total_states = num_positions + num_velocities
 
-    datapath = Path("data/example_data.pkl")
-    traj = FootstepTrajectory.load(datapath)
+    print(f"Number of positions: {num_positions}")
+    print(f"Number of velocities: {num_velocities}")
+    print(f"Total states: {total_states}")
+    print()
 
-    breakpoint()
+    # Get position and velocity names
+    position_names = []
+    velocity_names = []
 
-    meshcat = StartMeshcat()
+    for joint_index in range(plant.num_joints()):
+        joint = plant.get_joint(JointIndex(joint_index))
+        for position_index in range(joint.num_positions()):
+            pos_name = joint.name()
+            if joint.num_positions() > 1:
+                pos_name += f"_{position_index}"
+            position_names.append(pos_name)
+        for velocity_index in range(joint.num_velocities()):
+            vel_name = joint.name()
+            if joint.num_velocities() > 1:
+                vel_name += f"_{velocity_index}"
+            velocity_names.append(vel_name)
 
-    builder = DiagramBuilder()
-    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
+    # Print position and velocity names
+    print("Positions:", position_names)
+    print("Velocities:", velocity_names)
+    print()
 
-    parser = Parser(plant)
-    # atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
-    atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
-    atlas_model_instance = parser.AddModelsFromUrl(atlas_model_file)[0]
+    # Print all frame names
+    print("Frames in the robot:")
+    for frame in plant.GetFrameIndices(atlas_model_instance):
+        frame_name = plant.get_frame(frame).name()
+        print(frame_name)
+    print()
 
-    visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
-    diagram = builder.Build()
-    diagram.set_name("plant and scene_graph")
-
-    BOX_HEIGHT = 0.5
-    z_pos = -BOX_HEIGHT / 2
-    boxes = [
-        Box(1.0, 2.0, BOX_HEIGHT),
-        Box(1.0, 2.0, BOX_HEIGHT),
-    ]
-    box_pos = [
-        np.array([-0.7, 0.0]),
-        np.array([0.7, 0.0]),
-    ]
-
-    friction = CoulombFriction(static_friction=0.9, dynamic_friction=0.5)
-
-    for idx, (box, pos) in enumerate(zip(boxes, box_pos)):
-        transform = RigidTransform(np.array([pos[0], pos[1], z_pos]))  # type: ignore
-        plant.RegisterCollisionGeometry(
-            plant.world_body(),
-            transform,
-            box,
-            f"box_{idx}",
-            friction,
+    # Iterate over all joints
+    for joint_index in range(plant.num_joints()):
+        joint = plant.get_joint(JointIndex(joint_index))
+        print(
+            f"Joint '{joint.name()}' corresponds to generalized coordinates: "
+            f"{joint.position_start()}, {joint.position_start() + joint.num_positions() - 1}"
         )
-        plant.RegisterVisualGeometry(
-            plant.world_body(),
-            transform,
-            box,
-            f"box_{idx}_visual",
-            [0.5, 0.5, 0.8, 1.0],  # RGBA color (light blue in this case)
+        print(
+            f"  Associated frames: {joint.frame_on_parent().name()} and {joint.frame_on_child().name()}"
         )
 
-    plant.Finalize()
 
-    print_details = False
-    if print_details:
-        # Query the number of positions and velocities
-        num_positions = plant.num_positions()
-        num_velocities = plant.num_velocities()
-        total_states = num_positions + num_velocities
-
-        print(f"Number of positions: {num_positions}")
-        print(f"Number of velocities: {num_velocities}")
-        print(f"Total states: {total_states}")
-
-        # Get position and velocity names
-        position_names = []
-        velocity_names = []
-
-        for joint_index in range(plant.num_joints()):
-            joint = plant.get_joint(JointIndex(joint_index))
-            for position_index in range(joint.num_positions()):
-                pos_name = joint.name()
-                if joint.num_positions() > 1:
-                    pos_name += f"_{position_index}"
-                position_names.append(pos_name)
-            for velocity_index in range(joint.num_velocities()):
-                vel_name = joint.name()
-                if joint.num_velocities() > 1:
-                    vel_name += f"_{velocity_index}"
-                velocity_names.append(vel_name)
-
-        # Print position and velocity names
-        print("Positions:", position_names)
-        print("Velocities:", velocity_names)
-
-        # Print all frame names
-        print("Frames in the robot:")
-        for frame in plant.GetFrameIndices(atlas_model_instance):
-            frame_name = plant.get_frame(frame).name()
-            print(frame_name)
-
-        # Iterate over all joints
-        for joint_index in range(plant.num_joints()):
-            joint = plant.get_joint(JointIndex(joint_index))
-            print(
-                f"Joint '{joint.name()}' corresponds to generalized coordinates: "
-                f"{joint.position_start()}, {joint.position_start() + joint.num_positions() - 1}"
-            )
-            print(
-                f"  Associated frames: {joint.frame_on_parent().name()} and {joint.frame_on_child().name()}"
-            )
-
-    context = diagram.CreateDefaultContext()
-    plant_context = plant.GetMyMutableContextFromRoot(context)
-
-    default_positions = plant.GetPositions(plant_context)
-
-    # Inverse kinematics
+def solve_ik(plant: MultibodyPlant) -> NDArray[np.float64]:
     base_frame = plant.GetFrameByName("pelvis", atlas_model_instance)
     left_foot_frame = plant.GetFrameByName("l_foot", atlas_model_instance)
     right_foot_frame = plant.GetFrameByName("r_foot", atlas_model_instance)
@@ -228,6 +250,46 @@ if __name__ == "__main__":
     else:
         raise RuntimeError("Couldn't find IK solution")
 
+    return solution  # type: ignore
+
+
+if __name__ == "__main__":
+    # Parameters
+    stone_height = 0.5
+
+    # Silence Drake messages
+    # logging.getLogger("drake").setLevel(logging.WARNING)
+
+    datapath = Path("data/example_data.pkl")
+    traj = FootstepTrajectory.load(datapath, stone_height=stone_height)
+
+    meshcat = StartMeshcat()
+
+    builder = DiagramBuilder()
+    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
+
+    parser = Parser(plant)
+    atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
+    # atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
+    atlas_model_instance = parser.AddModelsFromUrl(atlas_model_file)[0]
+
+    visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
+    diagram = builder.Build()
+    diagram.set_name("plant and scene_graph")
+
+    for stone in traj.stones:
+        stone.add_to_plant(plant)
+
+    plant.Finalize()
+
+    # print_atlas_model_details(plant, atlas_model_instance)
+
+    context = diagram.CreateDefaultContext()
+    plant_context = plant.GetMyMutableContextFromRoot(context)
+
+    default_positions = plant.GetPositions(plant_context)
+
+    solution = solve_ik(plant)
     plant.SetPositions(plant_context, solution)
 
     simulator = Simulator(diagram, context)
