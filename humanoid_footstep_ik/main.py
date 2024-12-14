@@ -6,10 +6,10 @@ import os
 
 from pydrake.common import temp_directory
 from pydrake.geometry import SceneGraphConfig, StartMeshcat
-from pydrake.geometry.all import MeshcatVisualizer
+from pydrake.geometry.all import Box, MeshcatVisualizer
 from pydrake.math import RigidTransform, RollPitchYaw
 from pydrake.multibody.parsing import Parser
-from pydrake.multibody.plant import AddMultibodyPlantSceneGraph
+from pydrake.multibody.plant import AddMultibodyPlantSceneGraph, CoulombFriction
 from pydrake.multibody.tree import JointIndex
 from pydrake.systems.analysis import Simulator
 from pydrake.systems.framework import DiagramBuilder
@@ -26,11 +26,34 @@ if __name__ == "__main__":
     atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
     parser.AddModelsFromUrl(atlas_model_file)
 
-    plant.Finalize()
-
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
     diagram.set_name("plant and scene_graph")
+
+    BOX_HEIGHT = 0.5
+    z_pos = -BOX_HEIGHT / 2
+    boxes = [Box(1.0, 2.0, BOX_HEIGHT)]
+    box_pos = [np.array([-0.5, -0.5])]
+    friction = CoulombFriction(static_friction=0.9, dynamic_friction=0.5)
+
+    for idx, (box, pos) in enumerate(zip(boxes, box_pos)):
+        transform = RigidTransform(np.array([pos[0], pos[1], z_pos]))  # type: ignore
+        plant.RegisterCollisionGeometry(
+            plant.world_body(),
+            transform,
+            box,
+            f"box_{idx}",
+            friction,
+        )
+        plant.RegisterVisualGeometry(
+            plant.world_body(),
+            transform,
+            box,
+            f"box_{idx}_visual",
+            [0.5, 0.5, 0.8, 1.0],  # RGBA color (light blue in this case)
+        )
+
+    plant.Finalize()
 
     # Query the number of positions and velocities
     num_positions = plant.num_positions()
