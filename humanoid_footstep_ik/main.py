@@ -19,7 +19,7 @@ from pydrake.multibody.plant import (
 from pydrake.multibody.tree import JointIndex, ModelInstanceIndex
 from pydrake.solvers import Solve
 from pydrake.systems.analysis import Simulator
-from pydrake.systems.framework import DiagramBuilder
+from pydrake.systems.framework import Context, DiagramBuilder
 import pickle
 
 from dataclasses import dataclass, field
@@ -133,6 +133,16 @@ class FootstepTrajectory:
             com_xy_acceleration=data["com_xy_acceleration"],
             contact_modes=data["contact_modes"],
         )
+
+    def get_unique_foot_positions(
+        self, foot: Literal["right", "left"]
+    ) -> NDArray[np.float64]:
+        if foot == "right":
+            positions = self.right_foot_xy_position
+        else:
+            positions = self.left_foot_xy_position
+
+        return np.unique(positions, axis=0)
 
 
 def print_atlas_model_details(
@@ -265,6 +275,33 @@ def solve_ik(
     return solution  # type: ignore
 
 
+class VisualizationFoot:
+    def __init__(
+        self, right_or_left: Literal["left", "right"], plant: MultibodyPlant, name: str
+    ) -> None:
+        self.plant = plant
+        self.right_or_left = right_or_left
+
+        foot_file = Path(f"assets/atlas/{right_or_left}_foot.urdf")
+        assert foot_file.exists()
+        self.model_instance = Parser(plant).AddModels(str(foot_file))[0]
+
+        # NOTE: We must rename the feet so that they have unique names
+        plant.RenameModelInstance(self.model_instance, name)
+
+        if self.right_or_left == "left":
+            self.foot_body = plant.GetBodyByName("l_foot", self.model_instance)
+        else:
+            self.foot_body = plant.GetBodyByName("r_foot", self.model_instance)
+
+    def set_position(
+        self, plant_context: Context, pos_xy: NDArray[np.float64], pos_z: float
+    ) -> None:
+        pos = np.concatenate([pos_xy, [pos_z]])
+        pose = RigidTransform(p=pos)  # type: ignore
+        self.plant.SetFreeBodyPose(plant_context, self.foot_body, pose)
+
+
 def visualize_trajectory(
     traj: FootstepTrajectory, viz_params: VisualizationParams, debug: bool = False
 ) -> None:
@@ -278,14 +315,17 @@ def visualize_trajectory(
     # atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
     atlas_model_instance = parser.AddModelsFromUrl(atlas_model_file)[0]
 
-    # Add one foot per footstep in the plan
-    atlas_left_foot_file = Path("assets/atlas/left_foot.urdf")
-    assert atlas_left_foot_file.exists()
-    left_foot_instance = Parser(plant).AddModels(str(atlas_left_foot_file))[0]
+    left_foot_positions = traj.get_unique_foot_positions("left")
+    right_foot_positions = traj.get_unique_foot_positions("right")
 
-    atlas_right_foot_file = Path("assets/atlas/right_foot.urdf")
-    assert atlas_right_foot_file.exists()
-    right_foot_instance = Parser(plant).AddModels(str(atlas_right_foot_file))[0]
+    left_feet = [
+        VisualizationFoot("left", plant, name=f"left_{idx}")
+        for idx in range(len(left_foot_positions))
+    ]
+    right_feet = [
+        VisualizationFoot("right", plant, name=f"right_{idx}")
+        for idx in range(len(right_foot_positions))
+    ]
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
@@ -303,15 +343,12 @@ def visualize_trajectory(
     plant_context = plant.GetMyMutableContextFromRoot(context)
 
     # Set the positions of the free-floating feet
-    left_foot_body = plant.GetBodyByName("l_foot", left_foot_instance)
-    desired_position = [1.0, 1.0, 0.0]
-    pose = RigidTransform(p=desired_position)  # type: ignore
-    plant.SetFreeBodyPose(plant_context, left_foot_body, pose)
+    for pos, foot in zip(left_foot_positions, left_feet):
+        foot.set_position(plant_context, pos, traj.foot_z)
 
-    right_foot_body = plant.GetBodyByName("r_foot", right_foot_instance)
-    desired_position = [1.0, -1.0, 0.0]
-    pose = RigidTransform(p=desired_position)  # type: ignore
-    plant.SetFreeBodyPose(plant_context, right_foot_body, pose)
+    # Set the positions of the free-floating feet
+    for pos, foot in zip(right_foot_positions, right_feet):
+        foot.set_position(plant_context, pos, traj.foot_z)
 
     # default_positions = plant.GetPositions(plant_context)
 
