@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<robot name="atlas_right_foot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!-- right Foot Link -->
+  <link name="r_foot">
+    <inertial>
+      <mass value="2.410" />
+      <origin rpy="0 0 0" xyz="0.027 0 -0.067" />
+      <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.007" iyz="0" izz="0.008" />
+    </inertial>
+    <visual>
+      <geometry>
+        <mesh filename="package://drake_models/atlas/meshes/r_foot.gltf" />
+      </geometry>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="package://drake_models/atlas/meshes/r_foot_chull.obj" />
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- Frames for Sole and Toe -->
+  <frame link="r_foot" name="r_foot_sole" rpy="0 0 0" xyz="0.0426  0.0017 -0.07645" />
+  <frame link="r_foot" name="r_foot_toe" rpy="0 0 0" xyz="0.1728 0.0017 -0.07645" />
+</robot>
