@@ -5,7 +5,7 @@ from numpy.typing import NDArray
 from pathlib import Path
 import numpy as np
 
-from pydrake.geometry import Role, StartMeshcat
+from pydrake.geometry import Rgba, Role, SceneGraph, StartMeshcat
 from pydrake.geometry.all import MeshcatVisualizer
 from pydrake.geometry.all import Box as DrakeBox
 from pydrake.multibody.inverse_kinematics import InverseKinematics
@@ -29,8 +29,7 @@ from dataclasses import dataclass, field
 @dataclass
 class VisualizationParams:
     stone_height: float
-    feet_z_rotation: float
-    atlas_z_rot: float
+    robot_z_rot: float
 
 
 @dataclass
@@ -148,82 +147,31 @@ class FootstepTrajectory:
         return np.unique(positions, axis=0)
 
 
-def print_atlas_model_details(
-    plant: MultibodyPlant, atlas_model_instance: ModelInstanceIndex
-) -> None:
-    # Query the number of positions and velocities
-    num_positions = plant.num_positions()
-    num_velocities = plant.num_velocities()
-    total_states = num_positions + num_velocities
-
-    print(f"Number of positions: {num_positions}")
-    print(f"Number of velocities: {num_velocities}")
-    print(f"Total states: {total_states}")
-    print()
-
-    # Get position and velocity names
-    position_names = []
-    velocity_names = []
-
-    for joint_index in range(plant.num_joints()):
-        joint = plant.get_joint(JointIndex(joint_index))
-        for position_index in range(joint.num_positions()):
-            pos_name = joint.name()
-            if joint.num_positions() > 1:
-                pos_name += f"_{position_index}"
-            position_names.append(pos_name)
-        for velocity_index in range(joint.num_velocities()):
-            vel_name = joint.name()
-            if joint.num_velocities() > 1:
-                vel_name += f"_{velocity_index}"
-            velocity_names.append(vel_name)
-
-    # Print position and velocity names
-    print("Positions:", position_names)
-    print("Velocities:", velocity_names)
-    print()
-
-    # Print all frame names
-    print("Frames in the robot:")
-    for frame in plant.GetFrameIndices(atlas_model_instance):
-        frame_name = plant.get_frame(frame).name()
-        print(frame_name)
-    print()
-
-    # Iterate over all joints
-    for joint_index in range(plant.num_joints()):
-        joint = plant.get_joint(JointIndex(joint_index))
-        print(
-            f"Joint '{joint.name()}' corresponds to generalized coordinates: "
-            f"{joint.position_start()}, {joint.position_start() + joint.num_positions() - 1}"
-        )
-        print(
-            f"  Associated frames: {joint.frame_on_parent().name()} and {joint.frame_on_child().name()}"
-        )
-    print()
-
-    for body_index in plant.GetBodyIndices(plant.GetModelInstanceByName("atlas")):
-        body = plant.get_body(body_index)
-        print(f"Body name: {body.name()}")
-
-
 def solve_ik(
     plant: MultibodyPlant,
     atlas_model_instance: ModelInstanceIndex,
-    atlas_z_rotation: float,
+    robot_z_rotation: float,
     com: NDArray[np.float64],
     l_foot: NDArray[np.float64],
     r_foot: NDArray[np.float64],
+    q0: NDArray[np.float64],
 ) -> NDArray[np.float64]:
     base_frame = plant.GetFrameByName("pelvis", atlas_model_instance)
     left_foot_frame = plant.GetFrameByName("l_foot", atlas_model_instance)
     right_foot_frame = plant.GetFrameByName("r_foot", atlas_model_instance)
 
     robot_rotation = RollPitchYaw(
-        np.array([0.0, 0.0, atlas_z_rotation])  # type: ignore
+        np.array([0.0, 0.0, robot_z_rotation])  # type: ignore
     ).ToRotationMatrix()
 
     ik = InverseKinematics(plant)
+
+    # Stay close to nominal pose
+    prog = ik.get_mutable_prog()
+    q = ik.q()
+    prog.AddQuadraticErrorCost(np.identity(len(q)), q0, q)  # type: ignore
+    prog.SetInitialGuess(q, q0)  # type: ignore
+
     # CoM
     ik.AddPositionConstraint(
         frameB=base_frame,  # End-effector frame
@@ -323,21 +271,57 @@ class VisualizationFoot:
 
 
 class VisualizationAtlas:
-    def __init__(self, plant: MultibodyPlant, name: str) -> None:
+    def __init__(self, plant: MultibodyPlant, name: str, default_z_rot: float) -> None:
         self.plant = plant
         self.foot_height = FOOT_HEIGHT
 
-        atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
-        # atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
-        self.model_instance = Parser(plant).AddModelsFromUrl(atlas_model_file)[0]
+        # self.atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
+        self.atlas_model_file = (
+            "package://drake_models/atlas/atlas_minimal_contact.urdf"
+        )
+        self.model_instance = Parser(plant).AddModelsFromUrl(self.atlas_model_file)[0]
         # NOTE: We must rename the atlases so that they have unique names
-        plant.RenameModelInstance(self.model_instance, name)
+        self.name = name
+        plant.RenameModelInstance(self.model_instance, self.name)
         self.num_positions = 37
+
+        self.right_shoulder_x_idx = 19
+        self.right_shoulder_z_idx = 18
+
+        self.left_shoulder_x_idx = 11
+        self.left_shoulder_z_idx = 10
+
+        self.robot_z_rot = default_z_rot
+
+        # [com_quat, com_pos, ...]
+        self.q0 = np.zeros((self.num_positions,))
+        default_rot = (
+            RollPitchYaw(np.array([0.0, 0.0, default_z_rot]))  # type: ignore
+            .ToQuaternion()
+            .wxyz()
+        )
+        NUM_QUATERNIONS = 4
+        self.q0[:NUM_QUATERNIONS] = default_rot
+
+        self.q0[self.left_shoulder_x_idx] = -1.4
+        self.q0[self.left_shoulder_z_idx] = -0.3
+
+        self.q0[self.right_shoulder_x_idx] = 1.4
+        self.q0[self.right_shoulder_z_idx] = 0.3
+
+    def make_isolated_plant(self) -> tuple[MultibodyPlant, ModelInstanceIndex]:
+        builder = DiagramBuilder()
+        isolated_plant, _ = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
+        isolated_model_instance = Parser(isolated_plant).AddModelsFromUrl(
+            self.atlas_model_file
+        )[0]
+        isolated_plant.RenameModelInstance(isolated_model_instance, self.name)
+        isolated_plant.Finalize()
+        return isolated_plant, isolated_model_instance
 
     def set_com_and_feet_pos(
         self,
         plant_context: Context,
-        atlas_z_rot: float,
         com_xy: NDArray[np.float64],
         com_z: float,
         l_foot_xy: NDArray[np.float64],
@@ -349,14 +333,119 @@ class VisualizationAtlas:
         com = np.concatenate([com_xy, [com_z]])
         l_foot = np.concatenate([l_foot_xy, [l_foot_z + self.foot_height / 2]])
         r_foot = np.concatenate([r_foot_xy, [r_foot_z + self.foot_height / 2]])
+
+        # Make a plant with only this atlas for the IK
+        isolated_plant, isolated_model_instance = self.make_isolated_plant()
         solution = solve_ik(
-            self.plant, self.model_instance, atlas_z_rot, com, l_foot, r_foot
+            isolated_plant,
+            isolated_model_instance,
+            self.robot_z_rot,
+            com,
+            l_foot,
+            r_foot,
+            self.q0,
         )
+        # Set the positions of Atlas in the original plant
+
         self.plant.SetPositions(
             plant_context,
             self.model_instance,
-            solution[: self.num_positions],  # type: ignore
+            solution,  # type: ignore
         )
+
+    def print_details(self) -> None:
+        """
+        Prints a lot of details about the model. Useful for debugging.
+        """
+        plant, model_instance = self.make_isolated_plant()
+
+        # Query the number of positions and velocities
+        num_positions = plant.num_positions()
+        num_velocities = plant.num_velocities()
+        total_states = num_positions + num_velocities
+
+        print(f"Number of positions: {num_positions}")
+        print(f"Number of velocities: {num_velocities}")
+        print(f"Total states: {total_states}")
+        print()
+
+        # Get position and velocity names
+        position_names = []
+        velocity_names = []
+
+        for joint_index in range(plant.num_joints()):
+            joint = plant.get_joint(JointIndex(joint_index))
+            for position_index in range(joint.num_positions()):
+                pos_name = joint.name()
+                if joint.num_positions() > 1:
+                    pos_name += f"_{position_index}"
+                position_names.append(pos_name)
+            for velocity_index in range(joint.num_velocities()):
+                vel_name = joint.name()
+                if joint.num_velocities() > 1:
+                    vel_name += f"_{velocity_index}"
+                velocity_names.append(vel_name)
+
+        # Print position and velocity names
+        print("Positions:", position_names)
+        print("Velocities:", velocity_names)
+        print()
+
+        # Print all frame names
+        print("Frames in the robot:")
+        for frame in plant.GetFrameIndices(model_instance):
+            frame_name = plant.get_frame(frame).name()
+            print(frame_name)
+        print()
+
+        # Iterate over all joints
+        for joint_index in range(plant.num_joints()):
+            joint = plant.get_joint(JointIndex(joint_index))
+            print(
+                f"Joint '{joint.name()}' corresponds to generalized coordinates: "
+                f"{joint.position_start()}, {joint.position_start() + joint.num_positions() - 1}"
+            )
+            print(
+                f"  Associated frames: {joint.frame_on_parent().name()} and {joint.frame_on_child().name()}"
+            )
+        print()
+
+        for body_index in plant.GetBodyIndices(plant.GetModelInstanceByName(self.name)):
+            body = plant.get_body(body_index)
+            print(f"Body name: {body.name()}")
+
+    # def make_transparent(self, scene_graph: SceneGraph, alpha: float = 0.5) -> None:
+    #    """
+    #    Makes the Atlas model transparent by adjusting the alpha value of its illustration geometries.
+    #
+    #    Args:
+    #        scene_graph (SceneGraph): The SceneGraph associated with the plant.
+    #        alpha (float): Transparency value (0.0 = fully transparent, 1.0 = fully opaque).
+    #    """
+    #    if not (0.0 <= alpha <= 1.0):
+    #        raise ValueError("Alpha must be between 0.0 (transparent) and 1.0 (opaque).")
+    #
+    #    # Get the source ID for the plant
+    #    source_id = self.plant.get_source_id()
+    #
+    #    # Define the transparent color
+    #    transparent_color = Rgba(1.0, 1.0, 1.0, alpha)  # White with transparency
+    #
+    #    # Access SceneGraph's model inspector
+    #    inspector = scene_graph.model_inspector()
+    #
+    #    # Iterate over all bodies in the Atlas model instance
+    #    for body_index in self.plant.GetBodyIndices(self.model_instance):
+    #        body = self.plant.get_body(body_index)
+    #
+    #        # Retrieve geometry IDs associated with the body's visual geometries
+    #        geometry_ids = inspector.GetGeometries(body.index(), Role.kIllustration)
+    #
+    #        for geometry_id in geometry_ids:
+    #            # Update the geometry's illustration properties with transparency
+    #            illustration_properties = inspector.GetIllustrationProperties(geometry_id)
+    #            if illustration_properties is not None:
+    #                illustration_properties.UpdateProperty("phong", "diffuse", transparent_color)
 
 
 def visualize_trajectory(
@@ -383,7 +472,9 @@ def visualize_trajectory(
     # indices_to_visualize = [0, 10]
     indices_to_visualize = [0, 10]
     atlases = [
-        VisualizationAtlas(plant, name=f"atlas_at_{idx}")
+        VisualizationAtlas(
+            plant, name=f"atlas_at_{idx}", default_z_rot=viz_params.robot_z_rot
+        )
         for idx in indices_to_visualize
     ]
 
@@ -397,7 +488,7 @@ def visualize_trajectory(
     plant.Finalize()
 
     if debug:
-        print_atlas_model_details(plant, atlases[0].model_instance)
+        atlases[0].print_details()
 
     turn_off_collision_checking = True
     if turn_off_collision_checking:
@@ -414,7 +505,7 @@ def visualize_trajectory(
             plant_context,
             pos_xy=pos,
             pos_z=traj.foot_z,
-            rot_z=viz_params.feet_z_rotation,
+            rot_z=viz_params.robot_z_rot,
         )
 
     # Set the positions of the free-floating feet
@@ -423,14 +514,13 @@ def visualize_trajectory(
             plant_context,
             pos_xy=pos,
             pos_z=traj.foot_z,
-            rot_z=viz_params.feet_z_rotation,
+            rot_z=viz_params.robot_z_rot,
         )
 
     # Set the positions of the atlases
     for i, atlas in zip(indices_to_visualize, atlases):
         atlas.set_com_and_feet_pos(
             plant_context,
-            viz_params.atlas_z_rot,
             traj.com_xy_position[i],
             traj.com_z,
             traj.left_foot_xy_position[i],
@@ -460,8 +550,6 @@ if __name__ == "__main__":
     # TODO: We have the wrong robot height
     traj.com_z = 0.8
 
-    viz_params = VisualizationParams(
-        stone_height=0.5, feet_z_rotation=np.pi / 2, atlas_z_rot=-np.pi / 2
-    )
+    viz_params = VisualizationParams(stone_height=0.5, robot_z_rot=-np.pi / 2)
 
     visualize_trajectory(traj, viz_params, debug=False)
