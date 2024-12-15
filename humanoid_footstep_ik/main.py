@@ -9,7 +9,7 @@ from pydrake.geometry.all import MeshcatVisualizer
 from pydrake.geometry.all import Box as DrakeBox
 from pydrake.multibody.inverse_kinematics import InverseKinematics
 
-from pydrake.math import RigidTransform, RotationMatrix
+from pydrake.math import RigidTransform, RollPitchYaw, RotationMatrix
 from pydrake.multibody.parsing import Parser
 from pydrake.multibody.plant import (
     AddMultibodyPlantSceneGraph,
@@ -19,7 +19,7 @@ from pydrake.multibody.plant import (
 from pydrake.multibody.tree import JointIndex, ModelInstanceIndex
 from pydrake.solvers import Solve
 from pydrake.systems.analysis import Simulator
-from pydrake.systems.framework import DiagramBuilder
+from pydrake.systems.framework import Context, DiagramBuilder
 import pickle
 
 from dataclasses import dataclass, field
@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 @dataclass
 class VisualizationParams:
     stone_height: float
+    feet_z_rotation: float
 
 
 @dataclass
@@ -134,6 +135,16 @@ class FootstepTrajectory:
             contact_modes=data["contact_modes"],
         )
 
+    def get_unique_foot_positions(
+        self, foot: Literal["right", "left"]
+    ) -> NDArray[np.float64]:
+        if foot == "right":
+            positions = self.right_foot_xy_position
+        else:
+            positions = self.left_foot_xy_position
+
+        return np.unique(positions, axis=0)
+
 
 def print_atlas_model_details(
     plant: MultibodyPlant, atlas_model_instance: ModelInstanceIndex
@@ -187,6 +198,11 @@ def print_atlas_model_details(
         print(
             f"  Associated frames: {joint.frame_on_parent().name()} and {joint.frame_on_child().name()}"
         )
+    print()
+
+    for body_index in plant.GetBodyIndices(plant.GetModelInstanceByName("atlas")):
+        body = plant.get_body(body_index)
+        print(f"Body name: {body.name()}")
 
 
 def solve_ik(
@@ -260,6 +276,38 @@ def solve_ik(
     return solution  # type: ignore
 
 
+class VisualizationFoot:
+    def __init__(
+        self, right_or_left: Literal["left", "right"], plant: MultibodyPlant, name: str
+    ) -> None:
+        self.plant = plant
+        self.right_or_left = right_or_left
+        self.height = 0.15
+
+        foot_file = Path(f"assets/atlas/{right_or_left}_foot.urdf")
+        assert foot_file.exists()
+        self.model_instance = Parser(plant).AddModels(str(foot_file))[0]
+
+        # NOTE: We must rename the feet so that they have unique names
+        plant.RenameModelInstance(self.model_instance, name)
+
+        if self.right_or_left == "left":
+            self.foot_body = plant.GetBodyByName("l_foot", self.model_instance)
+        else:
+            self.foot_body = plant.GetBodyByName("r_foot", self.model_instance)
+
+    def set_pose(
+        self,
+        plant_context: Context,
+        pos_xy: NDArray[np.float64],
+        pos_z: float,
+        rot_z: float,
+    ) -> None:
+        pos = np.concatenate([pos_xy, [pos_z + self.height / 2]])
+        pose = RigidTransform(RollPitchYaw(0, 0, rot_z), pos)  # type: ignore
+        self.plant.SetFreeBodyPose(plant_context, self.foot_body, pose)
+
+
 def visualize_trajectory(
     traj: FootstepTrajectory, viz_params: VisualizationParams, debug: bool = False
 ) -> None:
@@ -273,8 +321,17 @@ def visualize_trajectory(
     # atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
     atlas_model_instance = parser.AddModelsFromUrl(atlas_model_file)[0]
 
-    if debug:
-        print_atlas_model_details(plant, atlas_model_instance)
+    left_foot_positions = traj.get_unique_foot_positions("left")
+    right_foot_positions = traj.get_unique_foot_positions("right")
+
+    left_feet = [
+        VisualizationFoot("left", plant, name=f"left_{idx}")
+        for idx in range(len(left_foot_positions))
+    ]
+    right_feet = [
+        VisualizationFoot("right", plant, name=f"right_{idx}")
+        for idx in range(len(right_foot_positions))
+    ]
 
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
@@ -285,13 +342,38 @@ def visualize_trajectory(
 
     plant.Finalize()
 
+    if debug:
+        print_atlas_model_details(plant, atlas_model_instance)
+
     context = diagram.CreateDefaultContext()
     plant_context = plant.GetMyMutableContextFromRoot(context)
 
-    default_positions = plant.GetPositions(plant_context)
+    # Set the positions of the free-floating feet
+    for pos, foot in zip(left_foot_positions, left_feet):
+        foot.set_pose(
+            plant_context,
+            pos_xy=pos,
+            pos_z=traj.foot_z,
+            rot_z=viz_params.feet_z_rotation,
+        )
 
+    # Set the positions of the free-floating feet
+    for pos, foot in zip(right_foot_positions, right_feet):
+        foot.set_pose(
+            plant_context,
+            pos_xy=pos,
+            pos_z=traj.foot_z,
+            rot_z=viz_params.feet_z_rotation,
+        )
+
+    # default_positions = plant.GetPositions(plant_context)
+
+    # Set Atlas positions
+    NUM_ATLAS_POSITIONS = 37
     solution = solve_ik(plant, atlas_model_instance)
-    plant.SetPositions(plant_context, solution)
+    plant.SetPositions(
+        plant_context, atlas_model_instance, solution[:NUM_ATLAS_POSITIONS]
+    )
 
     simulator = Simulator(diagram, context)
     simulator.set_target_realtime_rate(1.0)
@@ -308,6 +390,6 @@ if __name__ == "__main__":
     datapath = Path("data/example_data.pkl")
     traj = FootstepTrajectory.load(datapath)
 
-    viz_params = VisualizationParams(stone_height=0.5)
+    viz_params = VisualizationParams(stone_height=0.5, feet_z_rotation=np.pi / 2)
 
-    visualize_trajectory(traj, viz_params)
+    visualize_trajectory(traj, viz_params, debug=False)
