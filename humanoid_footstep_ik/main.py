@@ -9,7 +9,7 @@ from pydrake.geometry.all import MeshcatVisualizer
 from pydrake.geometry.all import Box as DrakeBox
 from pydrake.multibody.inverse_kinematics import InverseKinematics
 
-from pydrake.math import RigidTransform, RotationMatrix
+from pydrake.math import RigidTransform, RollPitchYaw, RotationMatrix
 from pydrake.multibody.parsing import Parser
 from pydrake.multibody.plant import (
     AddMultibodyPlantSceneGraph,
@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 @dataclass
 class VisualizationParams:
     stone_height: float
+    feet_z_rotation: float
 
 
 @dataclass
@@ -281,6 +282,7 @@ class VisualizationFoot:
     ) -> None:
         self.plant = plant
         self.right_or_left = right_or_left
+        self.height = 0.15
 
         foot_file = Path(f"assets/atlas/{right_or_left}_foot.urdf")
         assert foot_file.exists()
@@ -294,11 +296,15 @@ class VisualizationFoot:
         else:
             self.foot_body = plant.GetBodyByName("r_foot", self.model_instance)
 
-    def set_position(
-        self, plant_context: Context, pos_xy: NDArray[np.float64], pos_z: float
+    def set_pose(
+        self,
+        plant_context: Context,
+        pos_xy: NDArray[np.float64],
+        pos_z: float,
+        rot_z: float,
     ) -> None:
-        pos = np.concatenate([pos_xy, [pos_z]])
-        pose = RigidTransform(p=pos)  # type: ignore
+        pos = np.concatenate([pos_xy, [pos_z + self.height / 2]])
+        pose = RigidTransform(RollPitchYaw(0, 0, rot_z), pos)  # type: ignore
         self.plant.SetFreeBodyPose(plant_context, self.foot_body, pose)
 
 
@@ -344,11 +350,21 @@ def visualize_trajectory(
 
     # Set the positions of the free-floating feet
     for pos, foot in zip(left_foot_positions, left_feet):
-        foot.set_position(plant_context, pos, traj.foot_z)
+        foot.set_pose(
+            plant_context,
+            pos_xy=pos,
+            pos_z=traj.foot_z,
+            rot_z=viz_params.feet_z_rotation,
+        )
 
     # Set the positions of the free-floating feet
     for pos, foot in zip(right_foot_positions, right_feet):
-        foot.set_position(plant_context, pos, traj.foot_z)
+        foot.set_pose(
+            plant_context,
+            pos_xy=pos,
+            pos_z=traj.foot_z,
+            rot_z=viz_params.feet_z_rotation,
+        )
 
     # default_positions = plant.GetPositions(plant_context)
 
@@ -374,6 +390,6 @@ if __name__ == "__main__":
     datapath = Path("data/example_data.pkl")
     traj = FootstepTrajectory.load(datapath)
 
-    viz_params = VisualizationParams(stone_height=0.5)
+    viz_params = VisualizationParams(stone_height=0.5, feet_z_rotation=np.pi / 2)
 
     visualize_trajectory(traj, viz_params, debug=False)
