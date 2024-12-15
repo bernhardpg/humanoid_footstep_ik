@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 class VisualizationParams:
     stone_height: float
     feet_z_rotation: float
+    atlas_z_rot: float
 
 
 @dataclass
@@ -209,6 +210,7 @@ def print_atlas_model_details(
 def solve_ik(
     plant: MultibodyPlant,
     atlas_model_instance: ModelInstanceIndex,
+    atlas_z_rotation: float,
     com: NDArray[np.float64],
     l_foot: NDArray[np.float64],
     r_foot: NDArray[np.float64],
@@ -216,6 +218,10 @@ def solve_ik(
     base_frame = plant.GetFrameByName("pelvis", atlas_model_instance)
     left_foot_frame = plant.GetFrameByName("l_foot", atlas_model_instance)
     right_foot_frame = plant.GetFrameByName("r_foot", atlas_model_instance)
+
+    robot_rotation = RollPitchYaw(
+        np.array([0.0, 0.0, atlas_z_rotation])  # type: ignore
+    ).ToRotationMatrix()
 
     ik = InverseKinematics(plant)
     # CoM
@@ -228,13 +234,13 @@ def solve_ik(
         p_AQ_lower=com,  # type: ignore
         p_AQ_upper=com,  # type: ignore
     )
-    # ik.AddOrientationConstraint(
-    #     frameAbar=base_frame,
-    #     R_AbarA=RotationMatrix(),
-    #     frameBbar=plant.world_frame(),
-    #     R_BbarB=RotationMatrix(),
-    #     theta_bound=0.01,
-    # )
+    ik.AddOrientationConstraint(
+        frameAbar=base_frame,
+        R_AbarA=robot_rotation,
+        frameBbar=plant.world_frame(),
+        R_BbarB=RotationMatrix(),
+        theta_bound=0.01,
+    )
 
     # Left foot
     ik.AddPositionConstraint(
@@ -246,31 +252,31 @@ def solve_ik(
         p_AQ_lower=l_foot,  # type: ignore
         p_AQ_upper=l_foot,  # type: ignore
     )
-    # ik.AddOrientationConstraint(
-    #     frameAbar=left_foot_frame,
-    #     R_AbarA=RotationMatrix(),
-    #     frameBbar=plant.world_frame(),
-    #     R_BbarB=RotationMatrix(),
-    #     theta_bound=0.01,
-    # )
+    ik.AddOrientationConstraint(
+        frameAbar=left_foot_frame,
+        R_AbarA=robot_rotation,
+        frameBbar=plant.world_frame(),
+        R_BbarB=RotationMatrix(),
+        theta_bound=0.01,
+    )
 
     # Right foot
-    # ik.AddPositionConstraint(
-    #     frameB=right_foot_frame,
-    #     p_BQ=np.array(
-    #         [0.0, 0.0, 0.0]
-    #     ),  # Point Q in frame B (end-effector origin) # type: ignore
-    #     frameA=plant.world_frame(),  # World frame
-    #     p_AQ_lower=r_foot,  # type: ignore
-    #     p_AQ_upper=r_foot,  # type: ignore
-    # )
-    # ik.AddOrientationConstraint(
-    #     frameAbar=right_foot_frame,
-    #     R_AbarA=RotationMatrix(),
-    #     frameBbar=plant.world_frame(),
-    #     R_BbarB=RotationMatrix(),
-    #     theta_bound=0.01,
-    # )
+    ik.AddPositionConstraint(
+        frameB=right_foot_frame,
+        p_BQ=np.array(
+            [0.0, 0.0, 0.0]
+        ),  # Point Q in frame B (end-effector origin) # type: ignore
+        frameA=plant.world_frame(),  # World frame
+        p_AQ_lower=r_foot,  # type: ignore
+        p_AQ_upper=r_foot,  # type: ignore
+    )
+    ik.AddOrientationConstraint(
+        frameAbar=right_foot_frame,
+        R_AbarA=robot_rotation,
+        frameBbar=plant.world_frame(),
+        R_BbarB=RotationMatrix(),
+        theta_bound=0.01,
+    )
 
     result = Solve(ik.prog())
     if result.is_success():
@@ -290,7 +296,7 @@ class VisualizationFoot:
     ) -> None:
         self.plant = plant
         self.right_or_left = right_or_left
-        self.height = 0.15
+        self.height = FOOT_HEIGHT
 
         foot_file = Path(f"assets/atlas/{right_or_left}_foot.urdf")
         assert foot_file.exists()
@@ -319,6 +325,7 @@ class VisualizationFoot:
 class VisualizationAtlas:
     def __init__(self, plant: MultibodyPlant, name: str) -> None:
         self.plant = plant
+        self.foot_height = FOOT_HEIGHT
 
         atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
         # atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
@@ -330,6 +337,7 @@ class VisualizationAtlas:
     def set_com_and_feet_pos(
         self,
         plant_context: Context,
+        atlas_z_rot: float,
         com_xy: NDArray[np.float64],
         com_z: float,
         l_foot_xy: NDArray[np.float64],
@@ -339,9 +347,11 @@ class VisualizationAtlas:
     ) -> None:
         # Set Atlas positions
         com = np.concatenate([com_xy, [com_z]])
-        l_foot = np.concatenate([l_foot_xy, [l_foot_z]])
-        r_foot = np.concatenate([r_foot_xy, [r_foot_z]])
-        solution = solve_ik(self.plant, self.model_instance, com, l_foot, r_foot)
+        l_foot = np.concatenate([l_foot_xy, [l_foot_z + self.foot_height / 2]])
+        r_foot = np.concatenate([r_foot_xy, [r_foot_z + self.foot_height / 2]])
+        solution = solve_ik(
+            self.plant, self.model_instance, atlas_z_rot, com, l_foot, r_foot
+        )
         self.plant.SetPositions(
             plant_context,
             self.model_instance,
@@ -370,7 +380,8 @@ def visualize_trajectory(
     ]
 
     # TODO: Right now we get into trouble if the atlases collide
-    indices_to_visualize = [0, 10]
+    # indices_to_visualize = [0, 10]
+    indices_to_visualize = [0]
     atlases = [
         VisualizationAtlas(plant, name=f"atlas_at_{idx}")
         for idx in indices_to_visualize
@@ -386,7 +397,7 @@ def visualize_trajectory(
     plant.Finalize()
 
     if debug:
-        print_atlas_model_details(plant, atlas.model_instance)
+        print_atlas_model_details(plant, atlases[0].model_instance)
 
     context = diagram.CreateDefaultContext()
     plant_context = plant.GetMyMutableContextFromRoot(context)
@@ -413,6 +424,7 @@ def visualize_trajectory(
     for i, atlas in zip(indices_to_visualize, atlases):
         atlas.set_com_and_feet_pos(
             plant_context,
+            viz_params.atlas_z_rot,
             traj.com_xy_position[i],
             traj.com_z,
             traj.left_foot_xy_position[i],
@@ -435,9 +447,15 @@ if __name__ == "__main__":
     # Silence Drake messages
     # logging.getLogger("drake").setLevel(logging.WARNING)
 
+    FOOT_HEIGHT = 0.15
+
     datapath = Path("data/example_data.pkl")
     traj = FootstepTrajectory.load(datapath)
+    # TODO: We have the wrong robot height
+    traj.com_z = 0.85
 
-    viz_params = VisualizationParams(stone_height=0.5, feet_z_rotation=np.pi / 2)
+    viz_params = VisualizationParams(
+        stone_height=0.5, feet_z_rotation=np.pi / 2, atlas_z_rot=-np.pi / 2
+    )
 
     visualize_trajectory(traj, viz_params, debug=False)
