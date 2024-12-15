@@ -5,7 +5,7 @@ from numpy.typing import NDArray
 from pathlib import Path
 import numpy as np
 
-from pydrake.geometry import StartMeshcat
+from pydrake.geometry import Role, StartMeshcat
 from pydrake.geometry.all import MeshcatVisualizer
 from pydrake.geometry.all import Box as DrakeBox
 from pydrake.multibody.inverse_kinematics import InverseKinematics
@@ -17,7 +17,7 @@ from pydrake.multibody.plant import (
     CoulombFriction,
     MultibodyPlant,
 )
-from pydrake.multibody.tree import JointIndex, ModelInstanceIndex
+from pydrake.multibody.tree import BodyIndex, JointIndex, ModelInstanceIndex
 from pydrake.solvers import Solve
 from pydrake.systems.analysis import Simulator
 from pydrake.systems.framework import Context, DiagramBuilder
@@ -381,7 +381,7 @@ def visualize_trajectory(
 
     # TODO: Right now we get into trouble if the atlases collide
     # indices_to_visualize = [0, 10]
-    indices_to_visualize = [0]
+    indices_to_visualize = [0, 10]
     atlases = [
         VisualizationAtlas(plant, name=f"atlas_at_{idx}")
         for idx in indices_to_visualize
@@ -398,6 +398,12 @@ def visualize_trajectory(
 
     if debug:
         print_atlas_model_details(plant, atlases[0].model_instance)
+
+    turn_off_collision_checking = True
+    if turn_off_collision_checking:
+        source_id = plant.get_source_id()
+        for geometry_id in scene_graph.model_inspector().GetAllGeometryIds():
+            scene_graph.RemoveRole(source_id, geometry_id, Role.kProximity)
 
     context = diagram.CreateDefaultContext()
     plant_context = plant.GetMyMutableContextFromRoot(context)
@@ -452,7 +458,7 @@ if __name__ == "__main__":
     datapath = Path("data/example_data.pkl")
     traj = FootstepTrajectory.load(datapath)
     # TODO: We have the wrong robot height
-    traj.com_z = 0.85
+    traj.com_z = 0.8
 
     viz_params = VisualizationParams(
         stone_height=0.5, feet_z_rotation=np.pi / 2, atlas_z_rot=-np.pi / 2
