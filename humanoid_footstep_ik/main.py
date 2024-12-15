@@ -113,6 +113,9 @@ class FootstepTrajectory:
     com_xy_acceleration: NDArray[np.float64]
     contact_modes: list[Literal["Ld_Rd", "Ld_Ru", "Lu_Rd"]]
 
+    def __len__(self) -> int:
+        return self.com_xy_position.shape[0]
+
     @classmethod
     def load(cls, filepath: Path) -> "FootstepTrajectory":
         with open(filepath, "rb") as f:
@@ -468,9 +471,7 @@ def visualize_trajectory(
         for idx in range(len(right_foot_positions))
     ]
 
-    # TODO: Right now we get into trouble if the atlases collide
-    # indices_to_visualize = [0, 10]
-    indices_to_visualize = [0, 10]
+    indices_to_visualize = [0, len(traj) - 1]
     atlases = [
         VisualizationAtlas(
             plant, name=f"atlas_at_{idx}", default_z_rot=viz_params.robot_z_rot
