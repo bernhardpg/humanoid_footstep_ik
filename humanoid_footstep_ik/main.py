@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 class VisualizationParams:
     stone_height: float
     robot_z_rot: float
+    num_atlas_frames: int
 
 
 @dataclass
@@ -176,15 +177,16 @@ def solve_ik(
     prog.SetInitialGuess(q, q0)  # type: ignore
 
     # CoM
-    ik.AddPositionConstraint(
-        frameB=base_frame,  # End-effector frame
-        p_BQ=np.array(
-            [0.0, 0.0, 0.0]
-        ),  # Point Q in frame B (end-effector origin) # type: ignore
-        frameA=plant.world_frame(),  # World frame
-        p_AQ_lower=com,  # type: ignore
-        p_AQ_upper=com,  # type: ignore
-    )
+    # TODO: Add this back in
+    # ik.AddPositionConstraint(
+    #     frameB=base_frame,  # End-effector frame
+    #     p_BQ=np.array(
+    #         [0.0, 0.0, 0.0]
+    #     ),  # Point Q in frame B (end-effector origin) # type: ignore
+    #     frameA=plant.world_frame(),  # World frame
+    #     p_AQ_lower=com,  # type: ignore
+    #     p_AQ_upper=com,  # type: ignore
+    # )
     ik.AddOrientationConstraint(
         frameAbar=base_frame,
         R_AbarA=robot_rotation,
@@ -471,7 +473,12 @@ def visualize_trajectory(
         for idx in range(len(right_foot_positions))
     ]
 
-    indices_to_visualize = [0, len(traj) - 1]
+    # Pick out the indices to visualize, so that we start with the first and end with the last,
+    # and add as many as needed in between to reach viz_params.num_atlas_frames in total.
+    step_length = int(np.floor(len(traj) / (viz_params.num_atlas_frames - 1)))
+    indices_to_visualize = np.arange(0, len(traj), step_length)
+    if indices_to_visualize[-1] != len(traj) - 1:
+        indices_to_visualize = np.concatenate([indices_to_visualize, [len(traj) - 1]])
     atlases = [
         VisualizationAtlas(
             plant, name=f"atlas_at_{idx}", default_z_rot=viz_params.robot_z_rot
@@ -551,6 +558,8 @@ if __name__ == "__main__":
     # TODO: We have the wrong robot height
     traj.com_z = 0.8
 
-    viz_params = VisualizationParams(stone_height=0.5, robot_z_rot=-np.pi / 2)
+    viz_params = VisualizationParams(
+        stone_height=0.5, robot_z_rot=-np.pi / 2, num_atlas_frames=2
+    )
 
     visualize_trajectory(traj, viz_params, debug=False)
