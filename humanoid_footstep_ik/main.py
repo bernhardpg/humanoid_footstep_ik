@@ -1,5 +1,6 @@
 import logging
 from typing import Literal
+from numpy._core.numerictypes import float64
 from numpy.typing import NDArray
 from pathlib import Path
 import numpy as np
@@ -206,7 +207,11 @@ def print_atlas_model_details(
 
 
 def solve_ik(
-    plant: MultibodyPlant, atlas_model_instance: ModelInstanceIndex
+    plant: MultibodyPlant,
+    atlas_model_instance: ModelInstanceIndex,
+    com: NDArray[np.float64],
+    l_foot: NDArray[np.float64],
+    r_foot: NDArray[np.float64],
 ) -> NDArray[np.float64]:
     base_frame = plant.GetFrameByName("pelvis", atlas_model_instance)
     left_foot_frame = plant.GetFrameByName("l_foot", atlas_model_instance)
@@ -220,16 +225,16 @@ def solve_ik(
             [0.0, 0.0, 0.0]
         ),  # Point Q in frame B (end-effector origin) # type: ignore
         frameA=plant.world_frame(),  # World frame
-        p_AQ_lower=[0, 0, 0.7],  # type: ignore
-        p_AQ_upper=[0, 0, 1.0],  # type: ignore
+        p_AQ_lower=com,  # type: ignore
+        p_AQ_upper=com,  # type: ignore
     )
-    ik.AddOrientationConstraint(
-        frameAbar=base_frame,
-        R_AbarA=RotationMatrix(),
-        frameBbar=plant.world_frame(),
-        R_BbarB=RotationMatrix(),
-        theta_bound=0.01,
-    )
+    # ik.AddOrientationConstraint(
+    #     frameAbar=base_frame,
+    #     R_AbarA=RotationMatrix(),
+    #     frameBbar=plant.world_frame(),
+    #     R_BbarB=RotationMatrix(),
+    #     theta_bound=0.01,
+    # )
 
     # Left foot
     ik.AddPositionConstraint(
@@ -238,42 +243,45 @@ def solve_ik(
             [0.0, 0.0, 0.0]
         ),  # Point Q in frame B (end-effector origin) # type: ignore
         frameA=plant.world_frame(),  # World frame
-        p_AQ_lower=[0.1, 0.2, 0.0],  # type: ignore
-        p_AQ_upper=[0.1, 0.2, 0.2],  # type: ignore
+        p_AQ_lower=l_foot,  # type: ignore
+        p_AQ_upper=l_foot,  # type: ignore
     )
-    ik.AddOrientationConstraint(
-        frameAbar=left_foot_frame,
-        R_AbarA=RotationMatrix(),
-        frameBbar=plant.world_frame(),
-        R_BbarB=RotationMatrix(),
-        theta_bound=0.01,
-    )
+    # ik.AddOrientationConstraint(
+    #     frameAbar=left_foot_frame,
+    #     R_AbarA=RotationMatrix(),
+    #     frameBbar=plant.world_frame(),
+    #     R_BbarB=RotationMatrix(),
+    #     theta_bound=0.01,
+    # )
 
     # Right foot
-    ik.AddPositionConstraint(
-        frameB=right_foot_frame,
-        p_BQ=np.array(
-            [0.0, 0.0, 0.0]
-        ),  # Point Q in frame B (end-effector origin) # type: ignore
-        frameA=plant.world_frame(),  # World frame
-        p_AQ_lower=[0.2, -0.2, 0.0],  # type: ignore
-        p_AQ_upper=[0.2, -0.2, 0.2],  # type: ignore
-    )
-    ik.AddOrientationConstraint(
-        frameAbar=right_foot_frame,
-        R_AbarA=RotationMatrix(),
-        frameBbar=plant.world_frame(),
-        R_BbarB=RotationMatrix(),
-        theta_bound=0.01,
-    )
+    # ik.AddPositionConstraint(
+    #     frameB=right_foot_frame,
+    #     p_BQ=np.array(
+    #         [0.0, 0.0, 0.0]
+    #     ),  # Point Q in frame B (end-effector origin) # type: ignore
+    #     frameA=plant.world_frame(),  # World frame
+    #     p_AQ_lower=r_foot,  # type: ignore
+    #     p_AQ_upper=r_foot,  # type: ignore
+    # )
+    # ik.AddOrientationConstraint(
+    #     frameAbar=right_foot_frame,
+    #     R_AbarA=RotationMatrix(),
+    #     frameBbar=plant.world_frame(),
+    #     R_BbarB=RotationMatrix(),
+    #     theta_bound=0.01,
+    # )
 
     result = Solve(ik.prog())
     if result.is_success():
         solution = result.GetSolution(ik.q())
+        positions_for_model = plant.GetPositionsFromArray(
+            atlas_model_instance, solution
+        )
     else:
         raise RuntimeError("Couldn't find IK solution")
 
-    return solution  # type: ignore
+    return positions_for_model  # type: ignore
 
 
 class VisualizationFoot:
@@ -308,6 +316,39 @@ class VisualizationFoot:
         self.plant.SetFreeBodyPose(plant_context, self.foot_body, pose)
 
 
+class VisualizationAtlas:
+    def __init__(self, plant: MultibodyPlant, name: str) -> None:
+        self.plant = plant
+
+        atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
+        # atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
+        self.model_instance = Parser(plant).AddModelsFromUrl(atlas_model_file)[0]
+        # NOTE: We must rename the atlases so that they have unique names
+        plant.RenameModelInstance(self.model_instance, name)
+        self.num_positions = 37
+
+    def set_com_and_feet_pos(
+        self,
+        plant_context: Context,
+        com_xy: NDArray[np.float64],
+        com_z: float,
+        l_foot_xy: NDArray[np.float64],
+        l_foot_z: float,
+        r_foot_xy: NDArray[np.float64],
+        r_foot_z: float,
+    ) -> None:
+        # Set Atlas positions
+        com = np.concatenate([com_xy, [com_z]])
+        l_foot = np.concatenate([l_foot_xy, [l_foot_z]])
+        r_foot = np.concatenate([r_foot_xy, [r_foot_z]])
+        solution = solve_ik(self.plant, self.model_instance, com, l_foot, r_foot)
+        self.plant.SetPositions(
+            plant_context,
+            self.model_instance,
+            solution[: self.num_positions],  # type: ignore
+        )
+
+
 def visualize_trajectory(
     traj: FootstepTrajectory, viz_params: VisualizationParams, debug: bool = False
 ) -> None:
@@ -315,11 +356,6 @@ def visualize_trajectory(
 
     builder = DiagramBuilder()
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
-
-    parser = Parser(plant)
-    atlas_model_file = "package://drake_models/atlas/atlas_convex_hull.urdf"
-    # atlas_model_file = "package://drake_models/atlas/atlas_minimal_contact.urdf"
-    atlas_model_instance = parser.AddModelsFromUrl(atlas_model_file)[0]
 
     left_foot_positions = traj.get_unique_foot_positions("left")
     right_foot_positions = traj.get_unique_foot_positions("right")
@@ -333,6 +369,13 @@ def visualize_trajectory(
         for idx in range(len(right_foot_positions))
     ]
 
+    # TODO: Right now we get into trouble if the atlases collide
+    indices_to_visualize = [0, 10]
+    atlases = [
+        VisualizationAtlas(plant, name=f"atlas_at_{idx}")
+        for idx in indices_to_visualize
+    ]
+
     visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
     diagram = builder.Build()
     diagram.set_name("plant and scene_graph")
@@ -343,7 +386,7 @@ def visualize_trajectory(
     plant.Finalize()
 
     if debug:
-        print_atlas_model_details(plant, atlas_model_instance)
+        print_atlas_model_details(plant, atlas.model_instance)
 
     context = diagram.CreateDefaultContext()
     plant_context = plant.GetMyMutableContextFromRoot(context)
@@ -366,18 +409,23 @@ def visualize_trajectory(
             rot_z=viz_params.feet_z_rotation,
         )
 
-    # default_positions = plant.GetPositions(plant_context)
+    # Set the positions of the atlases
+    for i, atlas in zip(indices_to_visualize, atlases):
+        atlas.set_com_and_feet_pos(
+            plant_context,
+            traj.com_xy_position[i],
+            traj.com_z,
+            traj.left_foot_xy_position[i],
+            traj.foot_z,
+            traj.right_foot_xy_position[i],
+            traj.foot_z,
+        )
 
-    # Set Atlas positions
-    NUM_ATLAS_POSITIONS = 37
-    solution = solve_ik(plant, atlas_model_instance)
-    plant.SetPositions(
-        plant_context, atlas_model_instance, solution[:NUM_ATLAS_POSITIONS]
-    )
+    # default_positions = plant.GetPositions(plant_context)
 
     simulator = Simulator(diagram, context)
     simulator.set_target_realtime_rate(1.0)
-    simulator.AdvanceTo(0.05)
+    simulator.AdvanceTo(0.0)
 
     while True:
         ...
