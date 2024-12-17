@@ -162,6 +162,7 @@ def solve_ik(
     l_foot: NDArray[np.float64],
     r_foot: NDArray[np.float64],
     q0: NDArray[np.float64],
+    force_com: bool = True,
 ) -> NDArray[np.float64]:
     base_frame = plant.GetFrameByName("pelvis", atlas_model_instance)
     left_foot_frame = plant.GetFrameByName("l_foot", atlas_model_instance)
@@ -179,17 +180,17 @@ def solve_ik(
     prog.AddQuadraticErrorCost(np.identity(len(q)), q0, q)  # type: ignore
     prog.SetInitialGuess(q, q0)  # type: ignore
 
-    # CoM
-    # TODO: Add this back in
-    # ik.AddPositionConstraint(
-    #     frameB=base_frame,  # End-effector frame
-    #     p_BQ=np.array(
-    #         [0.0, 0.0, 0.0]
-    #     ),  # Point Q in frame B (end-effector origin) # type: ignore
-    #     frameA=plant.world_frame(),  # World frame
-    #     p_AQ_lower=com,  # type: ignore
-    #     p_AQ_upper=com,  # type: ignore
-    # )
+    if force_com:
+        # CoM
+        ik.AddPositionConstraint(
+            frameB=base_frame,  # End-effector frame
+            p_BQ=np.array(
+                [0.0, 0.0, 0.0]
+            ),  # Point Q in frame B (end-effector origin) # type: ignore
+            frameA=plant.world_frame(),  # World frame
+            p_AQ_lower=com,  # type: ignore
+            p_AQ_upper=com,  # type: ignore
+        )
     ik.AddOrientationConstraint(
         frameAbar=base_frame,
         R_AbarA=robot_rotation,
@@ -279,7 +280,7 @@ class VisualizationFoot:
 
 
 class VisualizationAtlas:
-    def __init__(self, plant: MultibodyPlant, name: str, default_z_rot: float) -> None:
+    def __init__(self, plant: MultibodyPlant, name: str) -> None:
         self.plant = plant
         self.foot_height = FOOT_HEIGHT
 
@@ -299,25 +300,6 @@ class VisualizationAtlas:
         self.left_shoulder_x_idx = 11
         self.left_shoulder_z_idx = 10
 
-        self.robot_z_rot = default_z_rot
-
-        # Nominal position
-        # [com_quat, com_pos, ...]
-        self.q0 = np.zeros((self.num_positions,))
-        default_rot = (
-            RollPitchYaw(np.array([0.0, 0.0, default_z_rot]))  # type: ignore
-            .ToQuaternion()
-            .wxyz()
-        )
-        NUM_QUATERNIONS = 4
-        self.q0[:NUM_QUATERNIONS] = default_rot
-
-        self.q0[self.left_shoulder_x_idx] = -1.4
-        self.q0[self.left_shoulder_z_idx] = -0.3
-
-        self.q0[self.right_shoulder_x_idx] = 1.4
-        self.q0[self.right_shoulder_z_idx] = 0.3
-
     def make_isolated_plant(self) -> tuple[MultibodyPlant, ModelInstanceIndex]:
         builder = DiagramBuilder()
         isolated_plant, _ = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
@@ -331,12 +313,14 @@ class VisualizationAtlas:
     def set_com_and_feet_pos(
         self,
         plant_context: Context,
+        robot_z_rot: float,
         com_xy: NDArray[np.float64],
         com_z: float,
         l_foot_xy: NDArray[np.float64],
         l_foot_z: float,
         r_foot_xy: NDArray[np.float64],
         r_foot_z: float,
+        force_com: bool,
     ) -> None:
         # Set Atlas positions
         com = np.concatenate([com_xy, [com_z]])
@@ -345,6 +329,26 @@ class VisualizationAtlas:
 
         # Make a plant with only this atlas for the IK
         isolated_plant, isolated_model_instance = self.make_isolated_plant()
+
+        self.robot_z_rot = robot_z_rot
+
+        # Nominal position
+        # [com_quat, com_pos, ...]
+        self.q0 = np.zeros((self.num_positions,))
+        default_rot = (
+            RollPitchYaw(np.array([0.0, 0.0, robot_z_rot]))  # type: ignore
+            .ToQuaternion()
+            .wxyz()
+        )
+        NUM_QUATERNIONS = 4
+        self.q0[:NUM_QUATERNIONS] = default_rot
+
+        self.q0[self.left_shoulder_x_idx] = -1.4
+        self.q0[self.left_shoulder_z_idx] = -0.3
+
+        self.q0[self.right_shoulder_x_idx] = 1.4
+        self.q0[self.right_shoulder_z_idx] = 0.3
+
         solution = solve_ik(
             isolated_plant,
             isolated_model_instance,
@@ -353,6 +357,7 @@ class VisualizationAtlas:
             l_foot,
             r_foot,
             self.q0,
+            force_com,
         )
         # Set the positions of Atlas in the original plant
 
@@ -480,10 +485,9 @@ def create_footstep_visualizations(
 def create_atlas_visualizations(
     plant: MultibodyPlant,
     indices_to_visualize: list[int],
-    robot_z_rot: float,
 ) -> list[VisualizationAtlas]:
     atlases = [
-        VisualizationAtlas(plant, name=f"atlas_at_{idx}", default_z_rot=robot_z_rot)
+        VisualizationAtlas(plant, name=f"atlas_at_{idx}")
         for idx in indices_to_visualize
     ]
     return atlases
@@ -525,18 +529,21 @@ def set_atlas_positions(
     viz_atlases: list[VisualizationAtlas],
     indices_to_visualize: list[int],
     robot_z_rotation: float,
+    force_com: bool,
 ) -> None:
 
     # Set the positions of the atlases
     for i, atlas in zip(indices_to_visualize, viz_atlases):
         atlas.set_com_and_feet_pos(
             plant_context,
+            robot_z_rotation,
             traj.com_xy_position[i],
             traj.com_z,
             traj.left_foot_xy_position[i],
             traj.foot_z,
             traj.right_foot_xy_position[i],
             traj.foot_z,
+            force_com,
         )
 
 
@@ -567,9 +574,7 @@ def visualize_trajectory(
     for stone in traj.stones:
         stone.add_to_plant(plant, viz_params.stone_height)
 
-    viz_atlases = create_atlas_visualizations(
-        plant, indices_to_visualize, robot_z_rot=viz_params.robot_z_rot  # type: ignore
-    )
+    viz_atlases = create_atlas_visualizations(plant, indices_to_visualize)
 
     viz_feet = create_footstep_visualizations(plant, traj)
 
@@ -590,7 +595,12 @@ def visualize_trajectory(
 
     set_feet_positions(plant_context, traj, viz_feet, viz_params.robot_z_rot)
     set_atlas_positions(
-        plant_context, traj, viz_atlases, indices_to_visualize, viz_params.robot_z_rot
+        plant_context,
+        traj,
+        viz_atlases,
+        indices_to_visualize,
+        viz_params.robot_z_rot,
+        force_com=False,
     )
 
     # default_positions = plant.GetPositions(plant_context)

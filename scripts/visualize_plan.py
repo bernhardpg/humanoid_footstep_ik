@@ -12,8 +12,6 @@ if __name__ == "__main__":
     # Silence Drake messages
     # logging.getLogger("drake").setLevel(logging.WARNING)
 
-    FOOT_HEIGHT = 0.15
-
     datapath = Path("data/example_data.pkl")
     traj = FootstepTrajectory.load(datapath)
     # TODO: We have the wrong robot height
