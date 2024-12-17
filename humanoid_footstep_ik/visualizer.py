@@ -26,6 +26,9 @@ import pickle
 from dataclasses import dataclass, field
 
 
+FOOT_HEIGHT = 0.15
+
+
 @dataclass
 class VisualizationParams:
     stone_height: float
@@ -298,6 +301,7 @@ class VisualizationAtlas:
 
         self.robot_z_rot = default_z_rot
 
+        # Nominal position
         # [com_quat, com_pos, ...]
         self.q0 = np.zeros((self.num_positions,))
         default_rot = (
@@ -453,14 +457,9 @@ class VisualizationAtlas:
     #                illustration_properties.UpdateProperty("phong", "diffuse", transparent_color)
 
 
-def visualize_trajectory(
-    traj: FootstepTrajectory, viz_params: VisualizationParams, debug: bool = False
-) -> None:
-    meshcat = StartMeshcat()
-
-    builder = DiagramBuilder()
-    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
-
+def create_footstep_visualizations(
+    plant: MultibodyPlant, traj: FootstepTrajectory
+) -> tuple[list[VisualizationFoot], list[VisualizationFoot]]:
     left_foot_positions = traj.get_unique_foot_positions("left")
     right_foot_positions = traj.get_unique_foot_positions("right")
 
@@ -473,39 +472,33 @@ def visualize_trajectory(
         for idx in range(len(right_foot_positions))
     ]
 
-    # Pick out the indices to visualize, so that we start with the first and end with the last,
-    # and add as many as needed in between to reach viz_params.num_atlas_frames in total.
-    step_length = int(np.floor(len(traj) / (viz_params.num_atlas_frames - 1)))
-    indices_to_visualize = np.arange(0, len(traj), step_length)
-    if indices_to_visualize[-1] != len(traj) - 1:
-        indices_to_visualize = np.concatenate([indices_to_visualize, [len(traj) - 1]])
+    feet = (left_feet, right_feet)
+
+    return feet
+
+
+def create_atlas_visualizations(
+    plant: MultibodyPlant,
+    indices_to_visualize: list[int],
+    robot_z_rot: float,
+) -> list[VisualizationAtlas]:
     atlases = [
-        VisualizationAtlas(
-            plant, name=f"atlas_at_{idx}", default_z_rot=viz_params.robot_z_rot
-        )
+        VisualizationAtlas(plant, name=f"atlas_at_{idx}", default_z_rot=robot_z_rot)
         for idx in indices_to_visualize
     ]
+    return atlases
 
-    visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
-    diagram = builder.Build()
-    diagram.set_name("plant and scene_graph")
 
-    for stone in traj.stones:
-        stone.add_to_plant(plant, viz_params.stone_height)
+def set_feet_positions(
+    plant_context: Context,
+    traj: FootstepTrajectory,
+    feet: tuple[list[VisualizationFoot], list[VisualizationFoot]],
+    robot_z_rotation: float,
+) -> None:
+    left_foot_positions = traj.get_unique_foot_positions("left")
+    right_foot_positions = traj.get_unique_foot_positions("right")
 
-    plant.Finalize()
-
-    if debug:
-        atlases[0].print_details()
-
-    turn_off_collision_checking = True
-    if turn_off_collision_checking:
-        source_id = plant.get_source_id()
-        for geometry_id in scene_graph.model_inspector().GetAllGeometryIds():
-            scene_graph.RemoveRole(source_id, geometry_id, Role.kProximity)
-
-    context = diagram.CreateDefaultContext()
-    plant_context = plant.GetMyMutableContextFromRoot(context)
+    left_feet, right_feet = feet
 
     # Set the positions of the free-floating feet
     for pos, foot in zip(left_foot_positions, left_feet):
@@ -513,7 +506,7 @@ def visualize_trajectory(
             plant_context,
             pos_xy=pos,
             pos_z=traj.foot_z,
-            rot_z=viz_params.robot_z_rot,
+            rot_z=robot_z_rotation,
         )
 
     # Set the positions of the free-floating feet
@@ -522,11 +515,20 @@ def visualize_trajectory(
             plant_context,
             pos_xy=pos,
             pos_z=traj.foot_z,
-            rot_z=viz_params.robot_z_rot,
+            rot_z=robot_z_rotation,
         )
 
+
+def set_atlas_positions(
+    plant_context: Context,
+    traj: FootstepTrajectory,
+    viz_atlases: list[VisualizationAtlas],
+    indices_to_visualize: list[int],
+    robot_z_rotation: float,
+) -> None:
+
     # Set the positions of the atlases
-    for i, atlas in zip(indices_to_visualize, atlases):
+    for i, atlas in zip(indices_to_visualize, viz_atlases):
         atlas.set_com_and_feet_pos(
             plant_context,
             traj.com_xy_position[i],
@@ -537,6 +539,60 @@ def visualize_trajectory(
             traj.foot_z,
         )
 
+
+def visualize_trajectory(
+    traj: FootstepTrajectory, viz_params: VisualizationParams, debug: bool = False
+) -> None:
+    meshcat = StartMeshcat()
+
+    builder = DiagramBuilder()
+    plant, scene_graph = AddMultibodyPlantSceneGraph(builder, time_step=0.001)
+
+    visualizer = MeshcatVisualizer.AddToBuilder(builder, scene_graph, meshcat)
+    diagram = builder.Build()
+    diagram.set_name("plant and scene_graph")
+
+    # NOTE: Replace this logic with manual frames if desired!
+
+    # Pick out the indices to visualize, so that we start with the first and end with the last,
+    # and add as many as needed in between to reach viz_params.num_atlas_frames in total.
+    step_length = int(np.floor(len(traj) / (viz_params.num_atlas_frames - 0)))
+    indices_to_visualize = np.arange(0, len(traj), step_length)
+    if indices_to_visualize[-1] != len(traj) - 1:
+        indices_to_visualize = np.concatenate([indices_to_visualize, [len(traj) - 1]])
+
+    indices_to_visualize = indices_to_visualize.tolist()
+
+    # Must first add objects to the plant
+    for stone in traj.stones:
+        stone.add_to_plant(plant, viz_params.stone_height)
+
+    viz_atlases = create_atlas_visualizations(
+        plant, indices_to_visualize, robot_z_rot=viz_params.robot_z_rot  # type: ignore
+    )
+
+    viz_feet = create_footstep_visualizations(plant, traj)
+
+    plant.Finalize()
+
+    if debug:
+        viz_atlases[0].print_details()
+
+    # turn off collision checking (there will be collisions between atlases and feet etc.)
+    turn_off_collision_checking = True
+    if turn_off_collision_checking:
+        source_id = plant.get_source_id()
+        for geometry_id in scene_graph.model_inspector().GetAllGeometryIds():
+            scene_graph.RemoveRole(source_id, geometry_id, Role.kProximity)
+
+    context = diagram.CreateDefaultContext()
+    plant_context = plant.GetMyMutableContextFromRoot(context)
+
+    set_feet_positions(plant_context, traj, viz_feet, viz_params.robot_z_rot)
+    set_atlas_positions(
+        plant_context, traj, viz_atlases, indices_to_visualize, viz_params.robot_z_rot
+    )
+
     # default_positions = plant.GetPositions(plant_context)
 
     simulator = Simulator(diagram, context)
@@ -545,21 +601,3 @@ def visualize_trajectory(
 
     while True:
         ...
-
-
-if __name__ == "__main__":
-    # Silence Drake messages
-    # logging.getLogger("drake").setLevel(logging.WARNING)
-
-    FOOT_HEIGHT = 0.15
-
-    datapath = Path("data/example_data.pkl")
-    traj = FootstepTrajectory.load(datapath)
-    # TODO: We have the wrong robot height
-    traj.com_z = 0.8
-
-    viz_params = VisualizationParams(
-        stone_height=0.5, robot_z_rot=-np.pi / 2, num_atlas_frames=2
-    )
-
-    visualize_trajectory(traj, viz_params, debug=False)
